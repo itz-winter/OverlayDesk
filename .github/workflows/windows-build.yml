@@ -1,0 +1,22 @@
+name: Windows build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test geometry and serialization
+        run: dotnet run --project OverlayDesk.Tests/OverlayDesk.Tests.csproj --configuration Release
+      - name: Build
+        run: dotnet build OverlayDesk/OverlayDesk.csproj --configuration Release
+      - name: Publish
+        run: dotnet publish OverlayDesk/OverlayDesk.csproj --configuration Release --runtime win-x64 --self-contained true --output publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OverlayDesk-win-x64
+          path: publish/
