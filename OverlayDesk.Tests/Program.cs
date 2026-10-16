@@ -74,4 +74,25 @@ Expect(roundtrip != null && roundtrip.Layouts.Count == 1 &&
     roundtrip.Layouts[0].Locked && roundtrip.Layouts[0].ForceKeepAspectRatio,
     "layout lock, aspect ratio and snap grid settings survive JSON roundtrip");
 
+var virtualDesktop = new Rectangle(-1920, -200, 5760, 2360);
+var contentOnScreen = new Rectangle(400, 150, 640, 480);
+var compactHost = OverlayHostGeometry.ClipAndPad(contentOnScreen, virtualDesktop, 12);
+Expect(compactHost.Width == 664 && compactHost.Height == 504,
+    "compact host is sized to file content, not the entire virtual screen");
+Expect(compactHost.Width < virtualDesktop.Width / 2,
+    "one small file does not create a desktop-sized native window");
+var oldHost = new Rectangle(400, 150, 320, 240);
+var newHost = new Rectangle(300, 120, 480, 300);
+var child = new Rectangle(10, 20, 100, 80);
+var rebased = OverlayHostGeometry.RebasedClientBounds(child, oldHost, newHost);
+Expect(rebased.Location == new Point(110, 50),
+    "rebased child uses correct offset after top-level window expansion");
+Expect(new Point(oldHost.X + child.X, oldHost.Y + child.Y) ==
+    new Point(newHost.X + rebased.X, newHost.Y + rebased.Y),
+    "expanding the host preserves file screen position exactly");
+var clippedHost = OverlayHostGeometry.ClipAndPad(
+    new Rectangle(-2000, -300, 250, 200), virtualDesktop, 20);
+Expect(clippedHost.Left == virtualDesktop.Left && clippedHost.Top == virtualDesktop.Top,
+    "host limits itself to visible monitors with negative desktop origins");
+
 Console.WriteLine("All overlay geometry/data tests passed.");

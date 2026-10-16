@@ -1,9 +1,6 @@
+using System.Drawing;
+
 namespace OverlayDesk;
-
-
-
-
-
 
 public static class SnapEngine
 {
@@ -42,8 +39,7 @@ public static class SnapEngine
         return moving;
     }
 
-    
-    public static Rectangle SnapResize(Rectangle proposed, IEnumerable<Rectangle> other,
+        public static Rectangle SnapResize(Rectangle proposed, IEnumerable<Rectangle> other,
         bool snapItems, bool snapGrid, int gridSize, Point desktopOrigin,
         int minimumSize = 24)
     {

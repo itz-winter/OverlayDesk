@@ -2,12 +2,6 @@ using System.Diagnostics;
 
 namespace OverlayDesk;
 
-
-
-
-
-
-
 public sealed class OverlayForm : Form
 {
     private sealed class FileCell
@@ -26,6 +20,9 @@ public sealed class OverlayForm : Form
     private readonly List<FileCell> _cells = new();
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 400 };
     private readonly Rectangle _desktop;
+    private Rectangle _hostBounds;
+    private const int IdlePadding = 12;
+    private const int GrowthPadding = 96;
     private Point _anchor;
     private Point _cursorStart;
     private Rectangle _startBounds;
@@ -36,7 +33,7 @@ public sealed class OverlayForm : Form
     private bool _skipCloseQuestion;
     private readonly Button _moveAllGrip = new();
     private readonly List<GridGuideForm> _gridGuides = new();
-    private readonly System.Windows.Forms.Timer _paintTimer = new() { Interval = 16 };
+    private readonly System.Windows.Forms.Timer _paintTimer = new() { Interval = 33 };
     private bool _regionDirty;
 
     public Guid LayoutId => _layout.Id;
@@ -49,7 +46,9 @@ public sealed class OverlayForm : Form
         _layout.GridSize = Math.Clamp(_layout.GridSize / 2 * 2, 8, 512);
         _save = save;
         _desktop = SystemInformation.VirtualScreen;
+        NormalizeAutomaticImageSizes(layout);
         _anchor = GetInitialAnchor(layout);
+        _hostBounds = CalculateInitialHostBounds(layout);
 
         Text = "OverlayDesk - " + layout.Name;
         FormBorderStyle = FormBorderStyle.None;
@@ -59,29 +58,16 @@ public sealed class OverlayForm : Form
         StartPosition = FormStartPosition.Manual;
         TopMost = layout.AlwaysOnTop;
         BackColor = Color.Black;
-        DoubleBuffered = true;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+                                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         KeyPreview = true;
         AutoScaleMode = AutoScaleMode.None;
-        Bounds = _desktop;
+        Bounds = _hostBounds;
         
-        
-
         foreach (OverlayItem item in layout.Items)
         {
             if (!File.Exists(item.Path)) continue;
             try
             {
-                
-                
-                if (item.SizeIsAutomatic && new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                    { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".ico" }
-                    .Contains(Path.GetExtension(item.Path)) && ImageDimensions.TryRead(item.Path) is Size dimensions)
-                {
-                    item.Width = dimensions.Width;
-                    item.Height = dimensions.Height;
-                    item.SizeIsAutomatic = false;
-                }
                 AddCell(item);
             }
             catch (Exception ex) { AddCell(item, ex.Message); }
@@ -122,6 +108,19 @@ public sealed class OverlayForm : Form
             _saveTimer.Dispose();
         };
         RefreshRegion();
+    }
+
+    private static void NormalizeAutomaticImageSizes(LayoutDefinition layout)
+    {
+        foreach (var item in layout.Items)
+        {
+            if (!item.SizeIsAutomatic || !File.Exists(item.Path) ||
+                !GdiImageExtensions.Contains(Path.GetExtension(item.Path))) continue;
+            if (ImageDimensions.TryRead(item.Path) is not Size dimensions) continue;
+            item.Width = dimensions.Width;
+            item.Height = dimensions.Height;
+            item.SizeIsAutomatic = false;
+        }
     }
 
     private static Point GetInitialAnchor(LayoutDefinition layout)
@@ -166,9 +165,7 @@ public sealed class OverlayForm : Form
         Controls.Add(surface);
         _cells.Add(cell);
 
-        
-        
-        if (content is NativeImageView)
+                        if (content is NativeImageView)
             AttachDragEvents(content, cell, DragMode.MoveOne);
         else if (content is not MediaView)
             AttachDragEvents(content, cell, DragMode.MoveOne, requireAlt: true);
@@ -182,8 +179,96 @@ public sealed class OverlayForm : Form
     }
 
     private Rectangle ToDesktopRectangle(OverlayItem item) => new(
-        _anchor.X + item.X - _desktop.Left, _anchor.Y + item.Y - _desktop.Top,
+        _anchor.X + item.X - _hostBounds.Left, _anchor.Y + item.Y - _hostBounds.Top,
         Math.Max(1, item.Width), Math.Max(1, item.Height));
+
+    private Rectangle CalculateInitialHostBounds(LayoutDefinition layout)
+    {
+        Rectangle union = Rectangle.Empty;
+        foreach (OverlayItem item in layout.Items)
+        {
+            if (!File.Exists(item.Path)) continue;
+            Rectangle screenRect = new(_anchor.X + item.X, _anchor.Y + item.Y,
+                Math.Max(1, item.Width), Math.Max(1, item.Height));
+            union = union.IsEmpty ? screenRect : Rectangle.Union(union, screenRect);
+        }
+        if (union.IsEmpty)
+            union = new Rectangle(_anchor.X, _anchor.Y, 320, 240);
+        return OverlayHostGeometry.ClipAndPad(union, _desktop, IdlePadding);
+    }
+
+                            private Point RebaseHost(Rectangle targetScreenBounds)
+    {
+        if (targetScreenBounds == _hostBounds) return Point.Empty;
+        Point delta = OverlayHostGeometry.ClientTranslation(_hostBounds, targetScreenBounds);
+        SuspendLayout();
+        try
+        {
+                                    Bounds = targetScreenBounds;
+            _hostBounds = targetScreenBounds;
+            foreach (FileCell cell in _cells)
+            {
+                Rectangle updated = cell.Surface.Bounds;
+                updated.Offset(delta);
+                cell.Surface.Bounds = updated;
+                if (_arranging) PositionGrips(cell);
+            }
+            if (_arranging) PositionMoveAllGrip();
+            if (_dragMode != DragMode.None)
+            {
+                _startBounds.Offset(delta);
+                for (int i = 0; i < _allStartBounds.Length; i++)
+                    _allStartBounds[i].Offset(delta);
+            }
+        }
+        finally { ResumeLayout(false); }
+        RefreshRegion();
+        return delta;
+    }
+
+    private Point EnsureHostContains(IReadOnlyList<Rectangle> proposed)
+    {
+        Rectangle wanted = _hostBounds;
+        foreach (Rectangle clientRect in proposed)
+        {
+                                    if (clientRect.Left >= 0 && clientRect.Top >= 0 &&
+                clientRect.Right <= _hostBounds.Width &&
+                clientRect.Bottom <= _hostBounds.Height) continue;
+            Rectangle absolute = new(_hostBounds.X + clientRect.X,
+                _hostBounds.Y + clientRect.Y, clientRect.Width, clientRect.Height);
+            absolute.Inflate(GrowthPadding, GrowthPadding);
+            wanted = Rectangle.Union(wanted, absolute);
+        }
+        wanted = Rectangle.Intersect(wanted, _desktop);
+        return wanted.IsEmpty ? Point.Empty : RebaseHost(wanted);
+    }
+
+    private void CompactHost()
+    {
+        Rectangle contents = Rectangle.Empty;
+        foreach (FileCell cell in _cells)
+        {
+            Rectangle r = cell.Surface.Bounds;
+            r.Offset(_hostBounds.Location);
+            contents = contents.IsEmpty ? r : Rectangle.Union(contents, r);
+            if (_arranging)
+            {
+                Rectangle move = cell.MoveGrip.Bounds;
+                move.Offset(_hostBounds.Location);
+                Rectangle size = cell.SizeGrip.Bounds;
+                size.Offset(_hostBounds.Location);
+                contents = Rectangle.Union(Rectangle.Union(contents, move), size);
+            }
+        }
+        if (_arranging && _cells.Count != 0)
+        {
+            Rectangle all = _moveAllGrip.Bounds;
+            all.Offset(_hostBounds.Location);
+            contents = Rectangle.Union(contents, all);
+        }
+        if (!contents.IsEmpty)
+            RebaseHost(OverlayHostGeometry.ClipAndPad(contents, _desktop, IdlePadding));
+    }
 
     private static Button MakeGrip(string title, Cursor cursor)
     {
@@ -264,8 +349,7 @@ public sealed class OverlayForm : Form
         };
         control.MouseCaptureChanged += (_, _) =>
         {
-            
-            if (_dragMode != DragMode.None && Control.MouseButtons == MouseButtons.None) FinishDrag();
+                        if (_dragMode != DragMode.None && Control.MouseButtons == MouseButtons.None) FinishDrag();
         };
     }
 
@@ -285,7 +369,7 @@ public sealed class OverlayForm : Form
         Point cursor = Cursor.Position;
         int dx = cursor.X - _cursorStart.X;
         int dy = cursor.Y - _cursorStart.Y;
-        Point origin = new(_desktop.Left, _desktop.Top);
+        Point origin = _hostBounds.Location;
         switch (_dragMode)
         {
             case DragMode.MoveOne when _active != null:
@@ -314,9 +398,7 @@ public sealed class OverlayForm : Form
                     var proposed = new Rectangle(_startBounds.Location, proportional);
                     Rectangle snapped = SnapEngine.SnapResize(proposed, targets,
                         _layout.SnapToItems, _layout.SnapToGrid, _layout.GridSize, origin);
-                    
-                    
-                    int primaryWidth = widthPrimary ? snapped.Width : proportional.Width;
+                                                            int primaryWidth = widthPrimary ? snapped.Width : proportional.Width;
                     int primaryHeight = widthPrimary ? proportional.Height : snapped.Height;
                     proportional = SnapEngine.KeepRatio(primaryWidth, primaryHeight,
                         _active.AspectRatio, widthPrimary);
@@ -338,27 +420,26 @@ public sealed class OverlayForm : Form
                 {
                     int left = _allStartBounds.Min(r => r.Left);
                     int top = _allStartBounds.Min(r => r.Top);
-                    moveDx += SnapEngine.GridDelta(left + dx + _desktop.Left, _layout.GridSize);
-                    moveDy += SnapEngine.GridDelta(top + dy + _desktop.Top, _layout.GridSize);
+                    moveDx += SnapEngine.GridDelta(left + dx + _hostBounds.Left, _layout.GridSize);
+                    moveDy += SnapEngine.GridDelta(top + dy + _hostBounds.Top, _layout.GridSize);
                 }
-                
-                var planned = new Rectangle[_cells.Count];
+                                var planned = new Rectangle[_cells.Count];
                 for (int i = 0; i < _cells.Count; i++)
                 {
                     planned[i] = _allStartBounds[i];
                     planned[i].Offset(moveDx, moveDy);
                 }
-                
-                
-                RefreshRegion(planned);
+                Point shift = EnsureHostContains(planned);
+                for (int i = 0; i < planned.Length; i++) planned[i].Offset(shift);
+                                                RefreshRegion(planned);
                 SuspendLayout();
                 for (int i = 0; i < _cells.Count; i++)
                 {
                     if (_cells[i].Surface.Bounds != planned[i]) _cells[i].Surface.Bounds = planned[i];
-                    PositionGrips(_cells[i]);
+                    if (_arranging) PositionGrips(_cells[i]);
                 }
                 ResumeLayout(false);
-                PositionMoveAllGrip();
+                if (_arranging) PositionMoveAllGrip();
                 QueueRegionRefresh();
                 break;
             }
@@ -368,18 +449,17 @@ public sealed class OverlayForm : Form
     private void ApplyBounds(FileCell cell, Rectangle proposed)
     {
         if (cell.Surface.Bounds == proposed) return;
+        Point shift = EnsureHostContains(new[] { proposed });
+        proposed.Offset(shift);
         RefreshRegion(new[] { proposed });
         cell.Surface.Bounds = proposed;
-        PositionGrips(cell);
+        if (_arranging) PositionGrips(cell);
         QueueRegionRefresh();
     }
 
     private void QueueRegionRefresh()
     {
-        
-        
-        
-        _regionDirty = true;
+                                _regionDirty = true;
         if (!_paintTimer.Enabled) _paintTimer.Start();
     }
 
@@ -390,18 +470,17 @@ public sealed class OverlayForm : Form
         _active = null;
         _paintTimer.Stop();
         _regionDirty = false;
+        CompactHost();
         RefreshRegion();
         SaveGeometry();
     }
 
     private void SaveGeometry()
     {
-        
-        
-        foreach (var cell in _cells)
+                        foreach (var cell in _cells)
         {
-            cell.Item.X = cell.Surface.Left + _desktop.Left - _anchor.X;
-            cell.Item.Y = cell.Surface.Top + _desktop.Top - _anchor.Y;
+            cell.Item.X = cell.Surface.Left + _hostBounds.Left - _anchor.X;
+            cell.Item.Y = cell.Surface.Top + _hostBounds.Top - _anchor.Y;
             cell.Item.Width = cell.Surface.Width;
             cell.Item.Height = cell.Surface.Height;
             cell.Item.SizeIsAutomatic = false;
@@ -424,8 +503,11 @@ public sealed class OverlayForm : Form
         int toolbarY = r.Y - 25 >= 0 ? r.Y - 25 : r.Y + 2;
         cell.MoveGrip.Location = new Point(r.X, toolbarY);
         cell.SizeGrip.Location = new Point(r.X + 50, toolbarY);
-        cell.MoveGrip.BringToFront();
-        cell.SizeGrip.BringToFront();
+        if (_arranging)
+        {
+            cell.MoveGrip.BringToFront();
+            cell.SizeGrip.BringToFront();
+        }
     }
 
     private void PositionMoveAllGrip()
@@ -434,20 +516,16 @@ public sealed class OverlayForm : Form
         int y = _cells.Min(c => c.Surface.Top);
         _moveAllGrip.Location = new Point(_cells.Min(c => c.Surface.Left) + 103,
             y - 25 >= 0 ? y - 25 : y + 2);
-        _moveAllGrip.BringToFront();
+        if (_arranging) _moveAllGrip.BringToFront();
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
     {
-        
-        
-    }
+                    }
 
     private void RefreshRegion(IEnumerable<Rectangle>? upcoming = null)
     {
-        
-        
-        using var region = new Region();
+                        using var region = new Region();
         region.MakeEmpty();
         foreach (var cell in _cells)
         {
@@ -481,6 +559,7 @@ public sealed class OverlayForm : Form
         PositionMoveAllGrip();
         RefreshRegion();
         RefreshGrid();
+        CompactHost();
         if (_arranging) Activate();
     }
 
@@ -499,6 +578,7 @@ public sealed class OverlayForm : Form
             _moveAllGrip.Visible = false;
         }
         DisposeGrid();
+        CompactHost();
         RefreshRegion();
         Persist();
     }
