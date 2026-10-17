@@ -5,3 +5,7 @@ $output = Join-Path $PSScriptRoot "publish"
 dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o $output
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Published application: $output"
+
+cd $output
+7z a OverlayDesk.7z * -mx=9
+move .\OverlayDesk.7z ..
